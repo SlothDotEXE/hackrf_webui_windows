@@ -1,5 +1,6 @@
-import React, { useMemo, useEffect, useRef } from 'react';
-import { Paper, Typography, Box, Slider, FormControlLabel, Switch, Collapse } from '@mui/material';
+import React, { useMemo, useEffect, useRef, useState } from 'react';
+import { Paper, Typography, Box, Slider, FormControlLabel, Switch, Collapse, Dialog, DialogTitle, DialogContent, IconButton } from '@mui/material';
+import CloseIcon from '@mui/icons-material/Close';
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -65,6 +66,14 @@ const SpectrumDisplay: React.FC<SpectrumDisplayProps> = ({
 }) => {
   // Add a ref to the chart for direct access
   const chartRef = useRef<any>(null);
+  
+  // State for clicked point information
+  const [clickedPoint, setClickedPoint] = useState<{
+    frequency: number;
+    power: number;
+    isFiltered: boolean;
+  } | null>(null);
+  const [showClickDialog, setShowClickDialog] = useState(false);
   
   // Display debug info
   useEffect(() => {
@@ -140,6 +149,39 @@ const SpectrumDisplay: React.FC<SpectrumDisplayProps> = ({
     maintainAspectRatio: false,
     animation: false,
     parsing: false,
+    onClick: (event, elements) => {
+      if (elements.length > 0) {
+        const element = elements[0];
+        const datasetIndex = element.datasetIndex;
+        const dataIndex = element.index;
+        
+        // Check if this is a click on filtered points (dataset 1) or regular points (dataset 0)
+        if (filterEnabled && datasetIndex === 1 && filteredIndices.length > 0) {
+          // Clicked on a filtered point
+          const originalIndex = filteredIndices[dataIndex];
+          const frequency = chartFreqs[originalIndex];
+          const power = chartMags[originalIndex];
+          
+          setClickedPoint({
+            frequency: frequency,
+            power: power,
+            isFiltered: true
+          });
+          setShowClickDialog(true);
+        } else if (!filterEnabled && datasetIndex === 0) {
+          // Clicked on regular spectrum when no filter is active
+          const frequency = chartFreqs[dataIndex];
+          const power = chartMags[dataIndex];
+          
+          setClickedPoint({
+            frequency: frequency,
+            power: power,
+            isFiltered: false
+          });
+          setShowClickDialog(true);
+        }
+      }
+    },
     elements: {
       point: {
         radius: 0
@@ -149,9 +191,8 @@ const SpectrumDisplay: React.FC<SpectrumDisplayProps> = ({
       }
     },
     interaction: {
-      mode: 'nearest',
-      axis: 'x',
-      intersect: false
+      mode: 'point',
+      intersect: true
     },
     hover: {
       mode: 'nearest',
@@ -237,16 +278,19 @@ const SpectrumDisplay: React.FC<SpectrumDisplayProps> = ({
         fill: false,
         spanGaps: true
       },
-      // Highlighted filtered points
+      // Highlighted filtered points (clickable)
       {
         data: filteredIndices.map(i => ({ x: chartFreqs[i], y: chartMags[i] })),
         borderColor: 'rgb(255, 99, 132)',
-        backgroundColor: 'rgba(255, 99, 132, 0.5)',
+        backgroundColor: 'rgba(255, 99, 132, 0.7)',
         borderWidth: 2,
-        pointRadius: 1,
+        pointRadius: 3,  // Larger points for easier clicking
+        pointHoverRadius: 5,  // Even larger on hover
         tension: 0,
         fill: false,
-        spanGaps: true
+        spanGaps: true,
+        pointBorderColor: 'rgb(255, 99, 132)',
+        pointBackgroundColor: 'rgba(255, 99, 132, 0.8)'
       }
     ] : [
       // Normal display when not filtering
@@ -304,6 +348,11 @@ const SpectrumDisplay: React.FC<SpectrumDisplayProps> = ({
                 Filter Range: {filterMinDb}dB to {filterMaxDb}dB 
                 {filteredIndices.length > 0 && ` (${filteredIndices.length} points highlighted)`}
               </Typography>
+              {filteredIndices.length > 0 && (
+                <Typography variant="caption" color="rgb(255, 99, 132)" sx={{ display: 'block', mb: 1 }}>
+                  🖱️ Click on any red point to see detailed frequency and power information
+                </Typography>
+              )}
               <Box sx={{ display: 'flex', gap: 2, alignItems: 'center' }}>
                 <Box sx={{ flex: 1 }}>
                   <Typography variant="caption">Min dB:</Typography>
@@ -350,6 +399,73 @@ const SpectrumDisplay: React.FC<SpectrumDisplayProps> = ({
           )}
         </Box>
       </Box>
+      
+      {/* Click Information Dialog */}
+      <Dialog 
+        open={showClickDialog} 
+        onClose={() => setShowClickDialog(false)}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          Signal Information
+          <IconButton onClick={() => setShowClickDialog(false)} size="small">
+            <CloseIcon />
+          </IconButton>
+        </DialogTitle>
+        <DialogContent>
+          {clickedPoint && (
+            <Box sx={{ py: 2 }}>
+              <Typography variant="h6" gutterBottom>
+                📡 Signal Details
+              </Typography>
+              
+              <Box sx={{ display: 'grid', gap: 1, gridTemplateColumns: '120px 1fr' }}>
+                <Typography variant="body2" color="text.secondary">
+                  Frequency:
+                </Typography>
+                <Typography variant="body1" sx={{ fontFamily: 'monospace', fontWeight: 'bold' }}>
+                  {clickedPoint.frequency.toFixed(6)} MHz
+                </Typography>
+                
+                <Typography variant="body2" color="text.secondary">
+                  Power:
+                </Typography>
+                <Typography variant="body1" sx={{ fontFamily: 'monospace', fontWeight: 'bold' }}>
+                  {clickedPoint.power.toFixed(2)} dB
+                </Typography>
+                
+                <Typography variant="body2" color="text.secondary">
+                  Type:
+                </Typography>
+                <Typography 
+                  variant="body1" 
+                  sx={{ 
+                    color: clickedPoint.isFiltered ? 'rgb(255, 99, 132)' : 'rgb(75, 192, 192)',
+                    fontWeight: 'bold'
+                  }}
+                >
+                  {clickedPoint.isFiltered ? '🎯 Filtered Signal' : '📊 Spectrum Point'}
+                </Typography>
+              </Box>
+              
+              {clickedPoint.isFiltered && (
+                <Box sx={{ mt: 2, p: 1, backgroundColor: 'rgba(255, 99, 132, 0.1)', borderRadius: 1 }}>
+                  <Typography variant="caption" color="rgb(255, 99, 132)">
+                    ✨ This signal matches your dB filter criteria ({filterMinDb}dB to {filterMaxDb}dB)
+                  </Typography>
+                </Box>
+              )}
+              
+              <Box sx={{ mt: 2, p: 1, backgroundColor: 'rgba(255, 255, 255, 0.05)', borderRadius: 1 }}>
+                <Typography variant="caption" color="text.secondary">
+                  💡 Tip: You can copy these values for further analysis
+                </Typography>
+              </Box>
+            </Box>
+          )}
+        </DialogContent>
+      </Dialog>
     </Paper>
   );
 };
