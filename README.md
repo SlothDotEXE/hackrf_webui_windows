@@ -7,6 +7,9 @@
 
 A powerful web-based spectrum analyzer for HackRF One with real-time visualization, advanced filtering, and signal analysis capabilities.
 
+![HackRF WebUI Screenshot](docs/images/hackrf-webui-screenshot.png)
+
+
 ## ✨ Features
 
 ### 🔴 **Real-Time Spectrum Analysis**
