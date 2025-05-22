@@ -35,6 +35,10 @@ interface SpectrumDisplayProps {
 }
 
 const SpectrumDisplay: React.FC<SpectrumDisplayProps> = ({ data, error }) => {
+  // Calculate dynamic min/max values for better visualization
+  const minPower = data?.magnitudes ? Math.max(-100, Math.min(...data.magnitudes) - 10) : -100;
+  const maxPower = data?.magnitudes ? Math.min(-20, Math.max(...data.magnitudes) + 10) : -20;
+
   const chartOptions: ChartOptions<'line'> = {
     responsive: true,
     animation: {
@@ -68,11 +72,14 @@ const SpectrumDisplay: React.FC<SpectrumDisplayProps> = ({ data, error }) => {
         display: true,
         position: 'left',
         bounds: 'data',
-        min: -100,
-        max: -20,
+        min: minPower,
+        max: maxPower,
         title: {
           display: true,
           text: 'Power (dB)'
+        },
+        grid: {
+          color: 'rgba(255, 255, 255, 0.1)'
         }
       }
     },
@@ -83,6 +90,22 @@ const SpectrumDisplay: React.FC<SpectrumDisplayProps> = ({ data, error }) => {
       title: {
         display: true,
         text: 'HackRF Spectrum Analyzer'
+      },
+      tooltip: {
+        enabled: true,
+        mode: 'index',
+        intersect: false,
+        callbacks: {
+          label: function(context) {
+            return `Power: ${context.parsed.y.toFixed(1)} dB`;
+          },
+          title: function(context) {
+            if (context[0]) {
+              return `Frequency: ${context[0].label} MHz`;
+            }
+            return '';
+          }
+        }
       }
     }
   };
@@ -95,7 +118,8 @@ const SpectrumDisplay: React.FC<SpectrumDisplayProps> = ({ data, error }) => {
         borderColor: 'rgb(75, 192, 192)',
         backgroundColor: 'rgba(75, 192, 192, 0.5)',
         pointRadius: 0,
-        tension: 0.1
+        tension: 0.1,
+        fill: false
       }
     ]
   };

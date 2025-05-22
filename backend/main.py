@@ -293,8 +293,14 @@ async def websocket_spectrum(websocket: WebSocket):
                     windowed = samples * signal.windows.blackman(len(samples))
                     spectrum = np.fft.fftshift(np.fft.fft(windowed))
                     
-                    # Convert to power in dB
-                    power_db = 20 * np.log10(np.abs(spectrum) + 1e-10)
+                    # Convert to power in dB with improved noise floor handling
+                    power = np.abs(spectrum)
+                    # Normalize to maximum power
+                    power = power / np.max(power + 1e-10)
+                    # Convert to dB with better dynamic range
+                    power_db = 20 * np.log10(power + 1e-10)
+                    # Clip to reasonable range
+                    power_db = np.clip(power_db, -100, 0)
                     
                     # Reduce number of points for display
                     decimation = 4
