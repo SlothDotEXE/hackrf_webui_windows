@@ -9,8 +9,11 @@ from dataclasses import dataclass, asdict
 import logging
 from datetime import datetime
 from scipy import signal
-from dsp import SignalProcessor
+from .dsp import SignalProcessor
 import time
+from .device import HackRFDevice, DeviceConfig
+from starlette.websockets import WebSocketDisconnect
+from .sdr_streamer import SDRStreamer
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -28,20 +31,21 @@ app.add_middleware(
 )
 
 # Global state
-active_device: Optional[SoapySDR.Device] = None
+hackrf = HackRFDevice()
 sweep_task: Optional[asyncio.Task] = None
 is_sweeping = False
 current_sweep_config = {
-    "start_freq": 0,
-    "stop_freq": 0,
-    "step_size": 20e6,  # 20MHz steps (HackRF's instantaneous bandwidth)
-    "current_freq": 0,
+    "start_freq": 88e6,
+    "stop_freq": 108e6,
+    "step_size": 20e6,
+    "current_freq": 88e6,
     "sample_rate": 20e6,
-    "last_update": None
+    "last_update": None,
+    "dwell_time": 0.5
 }
 
 # Add SignalProcessor instance to global state
-signal_processor = SignalProcessor(sample_rate=20e6)
+signal_processor = SignalProcessor(sample_rate=current_sweep_config["sample_rate"])
 
 @dataclass
 class DeviceInfo:
@@ -56,8 +60,19 @@ def get_hackrf_devices() -> List[DeviceInfo]:
     try:
         results = SoapySDR.Device.enumerate({"driver": "hackrf"})
         for result in results:
-            # Convert SoapySDRKwargs to dict
-            result_dict = {key: result[key] for key in result.keys()}
+            # Convert SoapySDRKwargs to dict safely
+            result_dict = {}
+            if hasattr(result, 'keys'): # Check if it's a dict-like object
+                result_dict = {key: result[key] for key in result.keys()}
+            elif isinstance(result, dict):
+                result_dict = result
+            else:
+                logger.warning(f"Unexpected device result format: {result}")
+                # Attempt to proceed with common keys if possible, or skip
+                # For now, we'll try to get serial, driver, label if they exist as attributes
+                # This part might need adjustment based on actual SoapySDR behavior for non-dict results
+                pass # Or handle more gracefully if possible
+
             device_info = DeviceInfo(
                 serial=result_dict.get("serial", "Unknown"),
                 driver=result_dict.get("driver", "hackrf"),
@@ -84,79 +99,35 @@ def get_hackrf_devices() -> List[DeviceInfo]:
             logger.error(f"Direct device creation also failed: {direct_error}")
     return devices
 
-def configure_device_for_frequency(freq: float, bandwidth: float = 20e6):
+async def configure_device_for_frequency(freq: float, bandwidth: float = 20e6):
     """Configure device for a specific frequency."""
-    global active_device
+    if not hackrf.device:
+        logger.warning("configure_device_for_frequency: No hackrf.device available")
+        return False
     
     try:
-        # Set sample rate (must be ≤ bandwidth)
-        sample_rate = min(current_sweep_config["sample_rate"], bandwidth)
-        print(f"Setting sample rate to {sample_rate/1e6:.2f}MHz")
-        active_device.setSampleRate(SoapySDR.SOAPY_SDR_RX, 0, sample_rate)
+        # This function now only updates the *shared* hackrf.config state.
+        # The SDRStreamer thread will be responsible for applying this to the hardware.
+        hackrf.config.center_freq = freq
+        hackrf.config.sample_rate = min(current_sweep_config.get("sample_rate", 20e6), bandwidth)
+        hackrf.config.bandwidth = bandwidth
         
-        # Set center frequency
-        print(f"Setting center frequency to {freq/1e6:.2f}MHz")
-        active_device.setFrequency(SoapySDR.SOAPY_SDR_RX, 0, freq)
-        
-        # Set bandwidth
-        print(f"Setting bandwidth to {bandwidth/1e6:.2f}MHz")
-        active_device.setBandwidth(SoapySDR.SOAPY_SDR_RX, 0, bandwidth)
-        
-        # Set gains
-        print("Setting gains: LNA=32, VGA=20")
-        active_device.setGain(SoapySDR.SOAPY_SDR_RX, 0, "LNA", 32)
-        active_device.setGain(SoapySDR.SOAPY_SDR_RX, 0, "VGA", 20)
-        
-        # Enable antenna
-        print("Setting antenna to RX")
-        active_device.setAntenna(SoapySDR.SOAPY_SDR_RX, 0, "RX")
-        
-        # Allow device to settle
-        time.sleep(0.01)
-        
-        # Clear any stale data in device buffers
-        active_device.setFrequency(SoapySDR.SOAPY_SDR_RX, 0, freq + 1)  # Small offset
-        time.sleep(0.001)
-        active_device.setFrequency(SoapySDR.SOAPY_SDR_RX, 0, freq)  # Back to desired frequency
-        
-        print("Device configuration complete")
+        logger.info(f"Global hackrf.config updated: Freq={freq/1e6:.2f}MHz, Rate={hackrf.config.sample_rate/1e6:.2f}MHz")
+        # The actual hardware calls (setFrequency, etc.) are now done by SDRStreamer
+        # hackrf.apply_config() # This should not be called here anymore for non-streamer contexts
         return True
     except Exception as e:
-        print(f"Error configuring device for frequency {freq/1e6:.2f}MHz: {e}")
+        logger.error(f"Error updating global hackrf.config: {e}")
         return False
 
 async def sweep_frequency():
     """Sweep through frequencies in steps."""
-    global current_sweep_config, active_device, is_sweeping
-    
-    print("Starting frequency sweep")  # Mandatory print
-    
-    try:
-        while is_sweeping:
-            current_freq = current_sweep_config["current_freq"]
-            
-            if current_freq > current_sweep_config["stop_freq"]:
-                # Reset to start frequency
-                print("Resetting to start frequency")  # Mandatory print
-                current_sweep_config["current_freq"] = current_sweep_config["start_freq"]
-                continue
-            
-            # Configure device for current frequency
-            print(f"Sweeping to {current_freq/1e6:.2f}MHz")  # Mandatory print
-            if configure_device_for_frequency(current_freq):
-                # Move to next frequency step
-                current_sweep_config["current_freq"] += current_sweep_config["step_size"]
-                # Small delay to allow device to settle
-                await asyncio.sleep(0.05)
-            else:
-                print(f"Failed to configure frequency {current_freq/1e6:.2f}MHz")  # Mandatory print
-                await asyncio.sleep(0.1)
-                
-    except Exception as e:
-        print(f"Error in sweep: {e}")  # Mandatory print
-        is_sweeping = False
-    finally:
-        print("Sweep task ended")  # Mandatory print
+    logger.warning("Sweep_frequency task started but sweep is currently disabled for SDRStreamer integration.")
+    global is_sweeping
+    while is_sweeping:
+        logger.info("Sweep active (but disabled). Sleeping...")
+        await asyncio.sleep(1) # Sleep while "sweeping" (disabled)
+    logger.info("Sweep_frequency task ended (sweep was disabled).")
 
 @app.post("/api/sweep/start")
 async def start_sweep(
@@ -165,280 +136,285 @@ async def start_sweep(
     sample_rate: float = Body(default=20e6)
 ):
     """Start spectrum sweep."""
-    global active_device, sweep_task, is_sweeping, current_sweep_config
+    global sweep_task, is_sweeping, current_sweep_config
     
-    print(f"Starting sweep from {start_freq/1e6:.2f}MHz to {stop_freq/1e6:.2f}MHz")  # Mandatory print
-    
-    if is_sweeping:
-        raise HTTPException(status_code=400, detail="Sweep already in progress")
+    logger.info("SWEEP START ENDPOINT CALLED - NOTE: Full sweep temporarily disabled for SDRStreamer testing.")
+    logger.info(f"Requested sweep from {start_freq/1e6:.2f}MHz to {stop_freq/1e6:.2f}MHz. Fixed frequency streaming will use start_freq.")
+
+    if is_sweeping: # Technically, is_sweeping will control the streamer thread now.
+        raise HTTPException(status_code=400, detail="Streaming already in progress (or sweep task active but disabled)")
     
     try:
         # Validate frequency range
         if start_freq >= stop_freq:
             raise HTTPException(status_code=400, detail="Start frequency must be less than stop frequency")
         
-        if not active_device:
+        if not hackrf.device:
             devices = get_hackrf_devices()
-            print(f"Found devices: {devices}")  # Mandatory print
+            logger.info(f"Found devices: {devices}")
             if not devices:
                 raise HTTPException(status_code=404, detail="No HackRF devices found")
             
             try:
-                print("Initializing HackRF device...")  # Mandatory print
-                active_device = SoapySDR.Device(dict(driver="hackrf"))
-                print("HackRF device initialized successfully")  # Mandatory print
+                logger.info("Initializing HackRF device for streaming... {devices}")
+                success = await hackrf.initialize()
+                if not success:
+                    raise HTTPException(status_code=500, detail="Failed to initialize HackRF device")
+                logger.info("HackRF device initialized successfully")
             except Exception as e:
-                print(f"Failed to initialize device: {str(e)}")  # Mandatory print
+                logger.error(f"Failed to initialize device: {str(e)}")
                 raise HTTPException(status_code=500, detail=f"Failed to initialize device: {str(e)}")
         
         # Configure sweep parameters
         current_sweep_config.update({
             "start_freq": start_freq,
             "stop_freq": stop_freq,
-            "current_freq": start_freq,
+            "current_freq": start_freq, # SDRStreamer will use this as its initial fixed frequency
             "sample_rate": sample_rate,
-            "step_size": 20e6,  # 20MHz steps
-            "last_update": None
+            "step_size": 20e6,
+            "last_update": None,
+            "dwell_time": 0.5 # Increased from 0.25 to 0.5 seconds
         })
         
-        print("Configuring initial frequency...")  # Mandatory print
-        if not configure_device_for_frequency(start_freq):
+        logger.info("Configuring initial frequency before starting sweep task...")
+        if not await configure_device_for_frequency(start_freq):
             raise HTTPException(status_code=500, detail="Failed to configure initial frequency")
         
-        is_sweeping = True
-        print("Starting sweep task...")  # Mandatory print
-        sweep_task = asyncio.create_task(sweep_frequency())
-        print("Sweep task created")  # Mandatory print
-        
-        return {"status": "success", "message": "Sweep started"}
+        is_sweeping = True # This flag will signal WebSocket to start/stop its streamer.
+        # sweep_task = asyncio.create_task(sweep_frequency()) # Sweep task disabled for now
+
+        return {"status": "success", "message": "Streaming (fixed frequency) initiated. Full sweep disabled."}
         
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Unexpected error starting sweep: {str(e)}")  # Mandatory print
+        logger.error(f"Unexpected error starting sweep/stream: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
 
 @app.post("/api/sweep/stop")
 async def stop_sweep():
     """Stop spectrum sweep."""
-    global active_device, sweep_task, is_sweeping
+    global sweep_task, is_sweeping
     
+    logger.info("SWEEP STOP ENDPOINT CALLED - This will stop any active SDRStreamer instances via WebSocket logic.")
+
     if not is_sweeping:
-        raise HTTPException(status_code=400, detail="No sweep in progress")
+        # If we want to be very robust, we could also try to find active streamer instances here, but
+        # the primary control is via is_sweeping flag which websockets should respect.
+        raise HTTPException(status_code=400, detail="Streaming not in progress (or sweep was disabled)")
     
-    try:
-        is_sweeping = False
-        if sweep_task:
-            await sweep_task
-            sweep_task = None
+    is_sweeping = False # Signal to WebSockets to stop their streamers
+    
+    # if sweep_task: # Sweep task disabled
+    #     try:
+    #         sweep_task.cancel()
+    #     except asyncio.CancelledError:
+    #         logger.info("Sweep task cancelled by stop_sweep.")
+    #     except Exception as e_cancel:
+    #         logger.error(f"Error cancelling sweep_task: {e_cancel}")
+    #     sweep_task = None
             
-        return {"status": "success", "message": "Sweep stopped"}
-        
-    except Exception as e:
-        logger.error(f"Error stopping sweep: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    return {"status": "success", "message": "Streaming stop signal sent. Full sweep was disabled."}
 
 @app.websocket("/ws/spectrum")
 async def websocket_spectrum(websocket: WebSocket):
     """WebSocket endpoint for streaming spectrum data."""
-    global active_device, is_sweeping, current_sweep_config
+    global is_sweeping, current_sweep_config, hackrf, signal_processor
     
-    print("New WebSocket connection attempt")
     await websocket.accept()
-    print("WebSocket connection accepted")
+    logger.info("WebSocket connection accepted. Waiting for is_sweeping to be true to start streamer.")
+
+    sdr_streamer: Optional[SDRStreamer] = None
+    sample_queue = asyncio.Queue(maxsize=20) # Queue for (samples, freq, rate) tuples from streamer
     
-    # Setup stream once outside the loop
-    rx_stream = None
     try:
-        if not active_device:
-            print("No active device available")
-            await websocket.close()
+        # Wait until sweep/streaming is actually started via HTTP endpoint
+        while not is_sweeping:
+            await asyncio.sleep(0.5)
+            # Check if client disconnected while waiting
+            try:
+                await asyncio.wait_for(websocket.receive_text(), timeout=0.01) 
+            except asyncio.TimeoutError:
+                pass # No message, continue waiting
+            except WebSocketDisconnect:
+                logger.info("WebSocket disconnected while waiting for sweep to start.")
+                return # Exit if client disconnects
+
+        logger.info("is_sweeping is true, proceeding to initialize SDRStreamer.")
+
+        if not hackrf.device:
+            logger.error("HackRF device not available when WebSocket tries to start streamer.")
+            await websocket.send_json({"type": "error", "message": "HackRF not initialized or unavailable."})
             return
+
+        # Create and start the SDRStreamer for this WebSocket connection
+        # Calculate center frequency to cover the full sweep range
+        start_freq = current_sweep_config["start_freq"]
+        stop_freq = current_sweep_config["stop_freq"]
+        center_freq = (start_freq + stop_freq) / 2  # Center of the sweep range
+        bandwidth = min(current_sweep_config["sample_rate"], stop_freq - start_freq + 10e6)  # Add some margin
         
-        print("Setting up RX stream...")
-        
-        # Configure stream using setupStream directly without StreamArgs
-        rx_stream = active_device.setupStream(SoapySDR.SOAPY_SDR_RX, "CF32", [0])
-        
-        print("Activating stream...")
-        flags = SoapySDR.SOAPY_SDR_HAS_TIME | SoapySDR.SOAPY_SDR_END_BURST
-        active_device.activateStream(rx_stream, flags, 0, 8192)
-        
-        buffer_size = 8192
-        buffer = np.zeros(buffer_size, np.complex64)
-        
-        # Initialize MTU size for optimal transfers
-        mtu = active_device.getStreamMTU(rx_stream)
-        print(f"Stream MTU: {mtu}")
-        
-        while True:
-            if not is_sweeping:
-                await asyncio.sleep(0.1)
-                continue
-            
+        streamer_config = DeviceConfig(
+            sample_rate=current_sweep_config["sample_rate"],
+            center_freq=center_freq,  # Use calculated center frequency
+            bandwidth=bandwidth,  # Use calculated bandwidth
+            lna_gain=hackrf.config.lna_gain, # Get current gains from global HackRFDevice config
+            vga_gain=hackrf.config.vga_gain,
+            buffer_size=hackrf.config.buffer_size # Use buffer size from global config
+        )
+
+        loop = asyncio.get_event_loop()
+        sdr_streamer = SDRStreamer(hackrf, sample_queue, loop)
+        sdr_streamer.start(initial_config=streamer_config)
+        logger.info(f"SDRStreamer started for WebSocket, center freq: {streamer_config.center_freq/1e6:.2f} MHz, covering {start_freq/1e6:.2f}-{stop_freq/1e6:.2f} MHz")
+
+        while is_sweeping: # Loop as long as global sweep flag is true
             try:
-                # Clear any stale data
-                _ = active_device.readStream(rx_stream, [buffer], len(buffer), timeoutUs=0)
+                raw_samples, capture_freq, capture_rate = await asyncio.wait_for(sample_queue.get(), timeout=1.0)
+                sample_queue.task_done()
+
+                logger.debug(f"WS: Got {len(raw_samples)} samples from queue. Freq: {capture_freq/1e6:.2f}MHz, Rate: {capture_rate/1e6:.2f}Msps")
+
+                # Process samples (FFT, etc.) - optimized for speed
+                # Ensure signal_processor's sample rate matches if it changed
+                if signal_processor.sample_rate != capture_rate:
+                    logger.info(f"Updating signal_processor sample rate to {capture_rate/1e6:.2f}Msps")
+                    signal_processor.sample_rate = capture_rate 
+                    # Re-create filters if necessary, or ensure SignalProcessor handles this
                 
-                # Read samples from HackRF with appropriate timeout
-                status = active_device.readStream(rx_stream, [buffer], len(buffer), timeoutUs=100000)
+                # Pre-decimate before windowing and FFT to reduce computation
+                pre_decimation = 4 # Reduce samples before heavy processing
+                samples_decimated = raw_samples[::pre_decimation]
                 
-                if status.ret > 0:
-                    print(f"Read {status.ret} samples")
-                    
-                    # Process samples to get spectrum
-                    samples = buffer[:status.ret]
-                    
-                    # Apply window function and compute FFT
-                    windowed = samples * signal.windows.blackman(len(samples))
-                    spectrum = np.fft.fftshift(np.fft.fft(windowed))
-                    
-                    # Convert to power in dB with improved noise floor handling
-                    power = np.abs(spectrum)
-                    # Normalize to maximum power
-                    power = power / np.max(power + 1e-10)
-                    # Convert to dB with better dynamic range
-                    power_db = 20 * np.log10(power + 1e-10)
-                    # Clip to reasonable range
-                    power_db = np.clip(power_db, -100, 0)
-                    
-                    # Reduce number of points for display
-                    decimation = 4
-                    power_db = power_db[::decimation]  # Use striding instead of reshape for decimation
-                    
-                    # Calculate frequency points
-                    freq_step = current_sweep_config["sample_rate"] / len(samples)
-                    freqs = np.arange(
-                        current_sweep_config["current_freq"] - current_sweep_config["sample_rate"]/2,
-                        current_sweep_config["current_freq"] + current_sweep_config["sample_rate"]/2,
-                        freq_step * decimation
-                    )
-                    
-                    # Send data to client
-                    await websocket.send_json({
-                        "type": "spectrum",
-                        "data": power_db.tolist(),
-                        "frequencies": freqs.tolist(),
-                        "timestamp": datetime.now().isoformat()
-                    })
-                    print("Sent spectrum data to client")
-                    
-                    # Small delay to prevent buffer overflow
-                    await asyncio.sleep(0.001)
-                    
-                else:
-                    print(f"readStream returned {status.ret}")
-                    if status.ret == SoapySDR.SOAPY_SDR_TIMEOUT:
-                        await asyncio.sleep(0.001)
-                    elif status.ret == SoapySDR.SOAPY_SDR_OVERFLOW:
-                        # On overflow, clear the buffer and wait briefly
-                        _ = active_device.readStream(rx_stream, [buffer], len(buffer), timeoutUs=0)
-                        await asyncio.sleep(0.005)
-                    else:
-                        await asyncio.sleep(0.001)
+                windowed = samples_decimated * signal.windows.blackman(len(samples_decimated))
+                spectrum = np.fft.fftshift(np.fft.fft(windowed))
+                power_db = 20 * np.log10(np.abs(spectrum) + 1e-10)
+                power_db = np.clip(power_db, -100, 0)
                 
-            except Exception as e:
-                print(f"Error in spectrum data streaming: {e}")
+                final_decimation = 4 # Further decimation on already processed data for final output
+                power_db_decimated = power_db[::final_decimation]
+                
+                num_points = len(power_db_decimated)
+                # Use original sample rate for frequency range to show full bandwidth
+                # The decimation is just for reducing data points, not changing the frequency range
+                freqs = np.linspace(
+                    capture_freq - (capture_rate / 2),
+                    capture_freq + (capture_rate / 2),
+                    num_points
+                ).tolist()
+                magnitudes = power_db_decimated.tolist()
+                
+                await websocket.send_json({
+                    "type": "spectrum",
+                    "frequencies": freqs,
+                    "magnitudes": magnitudes,
+                    "timestamp": int(time.time() * 1000),
+                    "center_freq": capture_freq 
+                })
+                logger.info(f"WS: Sent {num_points} spectrum points for {capture_freq/1e6:.2f} MHz")
+
+            except asyncio.TimeoutError:
+                logger.debug("WS: Timeout getting samples from queue. Checking is_sweeping flag.")
+                if not is_sweeping:
+                    logger.info("WS: is_sweeping is false, breaking from sample processing loop.")
+                    break # Exit loop if sweep stopped
+                continue # Continue if still sweeping but queue was empty
+            except WebSocketDisconnect:
+                logger.info("WS: WebSocket disconnected by client during streaming.")
+                is_sweeping = False # Stop streaming if client disconnects
                 break
-                
-    except Exception as e:
-        print(f"WebSocket error: {e}")
-    finally:
-        if rx_stream:
-            try:
-                print("Cleaning up stream...")
-                active_device.deactivateStream(rx_stream)
-                active_device.closeStream(rx_stream)
-                print("Stream cleanup complete")
             except Exception as e:
-                print(f"Error cleaning up stream: {e}")
-        await websocket.close()
-        print("WebSocket connection closed")
+                logger.error(f"WS: Error processing or sending spectrum data: {e}", exc_info=True)
+                # Maybe send an error to client, then break or continue carefully
+                await asyncio.sleep(0.1) # Small delay after error
+
+    except WebSocketDisconnect:
+        logger.info("WebSocket disconnected (outer).")
+    except Exception as e_outer:
+        logger.error(f"Outer WebSocket error: {e_outer}", exc_info=True)
+    finally:
+        logger.info("WebSocket connection closing. Stopping SDRStreamer if active.")
+        if sdr_streamer:
+            await sdr_streamer.stop()
+        # is_sweeping = False # Ensure is_sweeping is false if this WebSocket initiated it (more complex logic needed for multi-client)
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+        logger.info("WebSocket connection resources cleaned up.")
 
 @app.post("/api/tune")
 async def tune_frequency(freq: float, sample_rate: float = 2e6):
     """Tune to a specific frequency for FM demodulation."""
-    global active_device, is_sweeping
-    
+    logger.warning("Tune endpoint called - currently has no effect with SDRStreamer architecture.")
+    # This endpoint would need to interact with the SDRStreamer's command queue in the new architecture.
+    # For now, it does nothing to the active streamer.
     if is_sweeping:
-        await stop_sweep()
+        # await stop_sweep() # Or signal streamer to change frequency
+        logger.info("Tune called while streaming is active. Streamer frequency NOT changed by this call yet.")
+        pass 
+
+    # Update the global config, which might be picked up if a streamer is restarted.
+    hackrf.config.sample_rate = sample_rate
+    hackrf.config.center_freq = freq
+    # hackrf.apply_config() # This doesn't apply to active streamer directly
     
-    try:
-        if not active_device:
-            devices = get_hackrf_devices()
-            if not devices:
-                raise HTTPException(status_code=404, detail="No HackRF devices found")
-            
-            active_device = SoapySDR.Device(dict(driver="hackrf"))
-        
-        # Configure device for FM reception
-        active_device.setSampleRate(SoapySDR.SOAPY_SDR_RX, 0, sample_rate)
-        active_device.setFrequency(SoapySDR.SOAPY_SDR_RX, 0, freq)
-        active_device.setGain(SoapySDR.SOAPY_SDR_RX, 0, "LNA", 32)
-        active_device.setGain(SoapySDR.SOAPY_SDR_RX, 0, "VGA", 20)
-        
-        return {"status": "success", "message": f"Tuned to {freq/1e6:.2f} MHz"}
-        
-    except Exception as e:
-        logger.error(f"Error tuning frequency: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    return {"status": "warning", "message": f"Tune attempt to {freq/1e6:.2f} MHz. Streamer not directly affected in this version."}
 
 @app.post("/api/gains")
 async def set_gains(gains: Dict[str, int] = Body(...)):
     """Set device gain values."""
-    global active_device
-    
-    try:
-        if not active_device:
-            raise HTTPException(status_code=400, detail="No active device")
+    logger.info(f"Setting gains via API: {gains}")
+    if not hackrf.device:
+        raise HTTPException(status_code=400, detail="No active device to set gains on (HackRF not initialized)")
             
-        logger.info(f"Setting gains: {gains}")
-        
-        # Update each gain value
-        for gain_name, value in gains.items():
-            if gain_name in ["LNA", "VGA"]:  # Only allow these gain controls
-                try:
-                    active_device.setGain(SoapySDR.SOAPY_SDR_RX, 0, gain_name, value)
-                    logger.info(f"Set {gain_name} gain to {value}")
-                except Exception as e:
-                    logger.error(f"Failed to set {gain_name} gain: {str(e)}")
-                    raise HTTPException(status_code=500, detail=f"Failed to set {gain_name} gain: {str(e)}")
-        
-        # Return current gain values
-        current_gains = {
-            "LNA": active_device.getGain(SoapySDR.SOAPY_SDR_RX, 0, "LNA"),
-            "VGA": active_device.getGain(SoapySDR.SOAPY_SDR_RX, 0, "VGA")
-        }
-        
-        return {"status": "success", "gains": current_gains}
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Unexpected error setting gains: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
+    if "LNA" in gains:
+        hackrf.config.lna_gain = gains["LNA"]
+    if "VGA" in gains:
+        hackrf.config.vga_gain = gains["VGA"]
+    
+    # The SDRStreamer or HackRFDevice needs a way to re-apply these if a stream is active.
+    # For now, this updates hackrf.config. The streamer reads this upon its start.
+    # If a streamer is active, it won't see this change until it restarts or re-reads config (not implemented yet).
+    logger.info(f"Global hackrf.config gains updated: LNA={hackrf.config.lna_gain}, VGA={hackrf.config.vga_gain}")
+    # To apply to an active stream, SDRStreamer would need a 'set_gains' command.
+    # hackrf.set_gains(hackrf.config.lna_gain, hackrf.config.vga_gain) # This direct call might conflict with streamer
+
+    current_gains = {
+        "LNA": hackrf.config.lna_gain,
+        "VGA": hackrf.config.vga_gain
+    }
+    return {"status": "success", "message": "Global gain config updated. Active stream may not reflect change immediately.", "gains": current_gains}
 
 @app.get("/api/gains")
 async def get_gains():
     """Get current device gain values."""
-    global active_device
-    
-    try:
-        if not active_device:
-            raise HTTPException(status_code=400, detail="No active device")
-            
-        # Get current gain values
-        current_gains = {
-            "LNA": active_device.getGain(SoapySDR.SOAPY_SDR_RX, 0, "LNA"),
-            "VGA": active_device.getGain(SoapySDR.SOAPY_SDR_RX, 0, "VGA")
-        }
-        
-        return {"status": "success", "gains": current_gains}
-        
-    except Exception as e:
-        logger.error(f"Error getting gains: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+    if not hackrf.device:
+        # Fallback if device not initialized, return defaults or last known config
+        logger.warning("get_gains called but HackRF device not fully initialized. Returning stored config.")
+    current_gains = {
+        "LNA": hackrf.config.lna_gain,
+        "VGA": hackrf.config.vga_gain
+    }
+    return {"status": "success", "gains": current_gains}
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Clean up resources when shutting down."""
+    logger.info("Shutting down server. Ensuring is_sweeping is false.")
+    global is_sweeping #, sweep_task # sweep_task is disabled
+    is_sweeping = False
+    # if sweep_task:
+    #     try: sweep_task.cancel(); await sweep_task
+    #     except: pass 
+    #     sweep_task = None
+    if hackrf.device:
+        try: await hackrf.cleanup() # Assuming hackrf.cleanup() is async or can be awaited
+        except Exception as e: logger.error(f"Error during HackRF device cleanup on shutdown: {e}")
+    logger.info("Cleanup attempt on shutdown complete.")
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000) 
+    # Ensure correct import path if running main.py directly for testing
+    # This might require setting PYTHONPATH or using `python -m backend.main`
+    uvicorn.run("backend.main:app", host="0.0.0.0", port=8000, reload=False) # Disable reload for streamer stability 

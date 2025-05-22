@@ -6,6 +6,7 @@ import time
 import signal
 import logging
 from typing import List, Optional
+import socket
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -19,12 +20,45 @@ class ServerManager:
     def start_backend(self):
         """Start the FastAPI backend server."""
         try:
+            # First check if port 8000 is already in use
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            result = sock.connect_ex(('localhost', 8000))
+            sock.close()
+            
+            if result == 0:
+                logger.error("Port 8000 is already in use. Another instance of the server might be running.")
+                logger.info("Attempting to terminate any existing processes using port 8000...")
+                # Try to terminate existing process (Linux/macOS only)
+                try:
+                    subprocess.run("lsof -ti tcp:8000 | xargs kill -9", shell=True, check=True)
+                    time.sleep(1)  # Give time for process to terminate
+                except subprocess.CalledProcessError as e:
+                    logger.error(f"Failed to terminate existing process using lsof: {e}")
+                    logger.error("Please manually terminate any process using port 8000 and try again.")
+                    sys.exit(1)
+                except FileNotFoundError:
+                    logger.warning("lsof command not found. Skipping process termination. This might be an issue if a process is already using port 8000.")
+                except Exception as e:
+                    logger.error(f"An unexpected error occurred while trying to terminate existing process: {e}")
+                    logger.error("Please manually terminate any process using port 8000 and try again.")
+                    sys.exit(1)
+            
+            # Start the backend with enhanced error reporting
             self.backend_process = subprocess.Popen(
                 ["python", "-m", "uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 universal_newlines=True
             )
+            
+            # Check if process started successfully
+            time.sleep(1)
+            if self.backend_process.poll() is not None:
+                # Process exited immediately
+                stdout, stderr = self.backend_process.communicate()
+                logger.error(f"Backend server failed to start:\n{stderr}")
+                sys.exit(1)
+                
             logger.info("Backend server started")
         except Exception as e:
             logger.error(f"Failed to start backend server: {e}")
@@ -51,12 +85,30 @@ class ServerManager:
         if self.frontend_process:
             logger.info("Stopping frontend server...")
             self.frontend_process.terminate()
-            self.frontend_process.wait()
+            try:
+                self.frontend_process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                logger.warning("Frontend server did not terminate in time, forcing...")
+                self.frontend_process.kill()
 
         if self.backend_process:
             logger.info("Stopping backend server...")
             self.backend_process.terminate()
-            self.backend_process.wait()
+            try:
+                self.backend_process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                logger.warning("Backend server did not terminate in time, forcing...")
+                self.backend_process.kill()
+            
+            # Make sure to also terminate any lingering HackRF processes
+            try:
+                subprocess.run(["pkill", "-f", "hackrf"], check=False)
+            except FileNotFoundError:
+                logger.warning("pkill command not found. Skipping HackRF process termination.")
+            except subprocess.CalledProcessError as e:
+                logger.error(f"Error attempting to kill HackRF processes: {e}")
+            except Exception as e:
+                logger.error(f"An unexpected error occurred while trying to kill HackRF processes: {e}")
 
     def handle_signal(self, signum, frame):
         """Handle interrupt signals."""

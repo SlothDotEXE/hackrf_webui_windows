@@ -41,23 +41,70 @@ function App() {
   const [displayMode, setDisplayMode] = useState<DisplayMode>('spectrum');
   const [minDb, setMinDb] = useState<number>(-100); // Default minimum dB
   const [maxDb, setMaxDb] = useState<number>(-20); // Default maximum dB
+  const [filterMinDb, setFilterMinDb] = useState<number>(-100); // dB filter for spectrum
+  const [filterMaxDb, setFilterMaxDb] = useState<number>(0); // dB filter for spectrum
+  const [filterEnabled, setFilterEnabled] = useState<boolean>(false); // Enable/disable dB filtering
   const wsRef = useRef<WebSocket | null>(null);
+
+  // Calculate overall frequency range for the UI display
+  const overallMinFreq = startFreq / 1e6; // Convert to MHz
+  const overallMaxFreq = stopFreq / 1e6; // Convert to MHz
 
   useEffect(() => {
     if (isRunning && !wsRef.current) {
+      console.log("Creating new WebSocket connection...");
+      
       // Create WebSocket connection
       const ws = new WebSocket('ws://localhost:8000/ws/spectrum');
       
+      // Track connection state
+      let connectionActive = false;
+      
+      // Connection opened
+      ws.onopen = () => {
+        console.log('WebSocket connection established');
+        connectionActive = true;
+      };
+      
       ws.onmessage = (event) => {
         try {
+          // Check if message is a ping request
+          if (event.data === "ping") {
+            ws.send("pong");
+            return;
+          }
+          
           const data = JSON.parse(event.data);
           if (data.type === 'spectrum') {
-            setSpectrumData({
-              frequencies: data.frequencies,
-              magnitudes: data.data,
-              timestamp: Date.now()
-            });
-            setError('');
+            // Verify data has needed properties
+            if (data.frequencies && data.magnitudes && 
+                Array.isArray(data.frequencies) && 
+                Array.isArray(data.magnitudes) && 
+                data.frequencies.length > 0 && 
+                data.magnitudes.length > 0) {
+              
+              console.log(`Received spectrum data: ${data.magnitudes.length} points`);
+              
+              setSpectrumData({
+                frequencies: data.frequencies,
+                magnitudes: data.magnitudes,
+                timestamp: Date.now()
+              });
+              
+              // Clear any previous errors
+              if (error) setError('');
+            } else {
+              console.warn('Received malformed spectrum data', data);
+            }
+          } else if (data.type === 'error') {
+            // Handle error messages from backend
+            console.error('Backend error:', data.message);
+            setError(data.message || 'Unknown error from HackRF device');
+            
+            // If we get a resource busy error, we should stop the analyzer
+            if (data.message && data.message.includes('busy')) {
+              setIsRunning(false);
+            }
           }
         } catch (err) {
           console.error('Error parsing WebSocket data:', err);
@@ -70,9 +117,24 @@ function App() {
         setError('WebSocket connection error');
       };
 
-      ws.onclose = () => {
-        console.log('WebSocket connection closed');
+      ws.onclose = (event) => {
+        console.log(`WebSocket connection closed: ${event.code} ${event.reason}`);
         wsRef.current = null;
+        
+        // Auto-reconnect if unexpected close and still running
+        if (connectionActive && isRunning && event.code !== 1000) {
+          console.log('Attempting to reconnect in 1 second...');
+          setTimeout(() => {
+            if (isRunning) {
+              console.log('Reconnecting WebSocket...');
+              // Trigger effect to reconnect
+              const reconnect = () => {
+                setIsRunning(isRunning);
+              };
+              reconnect();
+            }
+          }, 1000);
+        }
       };
 
       wsRef.current = ws;
@@ -80,16 +142,29 @@ function App() {
       // Cleanup function
       return () => {
         if (wsRef.current) {
-          wsRef.current.close();
+          console.log("Closing WebSocket connection...");
+          try {
+            wsRef.current.close(1000, "Client initiated close");
+          } catch (e) {
+            console.error("Error closing WebSocket:", e);
+          }
           wsRef.current = null;
         }
       };
     } else if (!isRunning && wsRef.current) {
       // Close WebSocket when stopping
-      wsRef.current.close();
+      console.log("Stopping spectrum analyzer, closing WebSocket...");
+      try {
+        wsRef.current.close(1000, "Client stopped analyzer");
+      } catch (e) {
+        console.error("Error closing WebSocket:", e);
+      }
       wsRef.current = null;
+      
+      // Reset spectrum data when stopping
+      setSpectrumData(null);
     }
-  }, [isRunning, startFreq]);
+  }, [isRunning, error]);
 
   const handleStartStop = async () => {
     try {
@@ -164,6 +239,15 @@ function App() {
             <SpectrumDisplay
               data={spectrumData}
               error={error}
+              overallMinFreqMHz={overallMinFreq}
+              overallMaxFreqMHz={overallMaxFreq}
+              filterMinDb={filterMinDb}
+              filterMaxDb={filterMaxDb}
+              filterEnabled={filterEnabled}
+              onFilterMinDbChange={setFilterMinDb}
+              onFilterMaxDbChange={setFilterMaxDb}
+              onFilterEnabledChange={setFilterEnabled}
+              isRunning={isRunning}
             />
           ) : (
             <WaterfallDisplay
