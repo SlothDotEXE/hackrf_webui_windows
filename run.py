@@ -30,10 +30,16 @@ class ServerManager:
                 logger.info("Attempting to terminate any existing processes using port 8000...")
                 # Try to terminate existing process (Linux/macOS only)
                 try:
-                    subprocess.run(["lsof", "-ti", "tcp:8000", "|", "xargs", "kill", "-9"], shell=True)
+                    subprocess.run("lsof -ti tcp:8000 | xargs kill -9", shell=True, check=True)
                     time.sleep(1)  # Give time for process to terminate
+                except subprocess.CalledProcessError as e:
+                    logger.error(f"Failed to terminate existing process using lsof: {e}")
+                    logger.error("Please manually terminate any process using port 8000 and try again.")
+                    sys.exit(1)
+                except FileNotFoundError:
+                    logger.warning("lsof command not found. Skipping process termination. This might be an issue if a process is already using port 8000.")
                 except Exception as e:
-                    logger.error(f"Failed to terminate existing process: {e}")
+                    logger.error(f"An unexpected error occurred while trying to terminate existing process: {e}")
                     logger.error("Please manually terminate any process using port 8000 and try again.")
                     sys.exit(1)
             
@@ -96,9 +102,13 @@ class ServerManager:
             
             # Make sure to also terminate any lingering HackRF processes
             try:
-                subprocess.run(["pkill", "-f", "hackrf"], shell=True)
-            except:
-                pass
+                subprocess.run(["pkill", "-f", "hackrf"], check=False)
+            except FileNotFoundError:
+                logger.warning("pkill command not found. Skipping HackRF process termination.")
+            except subprocess.CalledProcessError as e:
+                logger.error(f"Error attempting to kill HackRF processes: {e}")
+            except Exception as e:
+                logger.error(f"An unexpected error occurred while trying to kill HackRF processes: {e}")
 
     def handle_signal(self, signum, frame):
         """Handle interrupt signals."""

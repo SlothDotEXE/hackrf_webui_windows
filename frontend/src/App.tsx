@@ -41,7 +41,14 @@ function App() {
   const [displayMode, setDisplayMode] = useState<DisplayMode>('spectrum');
   const [minDb, setMinDb] = useState<number>(-100); // Default minimum dB
   const [maxDb, setMaxDb] = useState<number>(-20); // Default maximum dB
+  const [filterMinDb, setFilterMinDb] = useState<number>(-100); // dB filter for spectrum
+  const [filterMaxDb, setFilterMaxDb] = useState<number>(0); // dB filter for spectrum
+  const [filterEnabled, setFilterEnabled] = useState<boolean>(false); // Enable/disable dB filtering
   const wsRef = useRef<WebSocket | null>(null);
+
+  // Calculate overall frequency range for the UI display
+  const overallMinFreq = startFreq / 1e6; // Convert to MHz
+  const overallMaxFreq = stopFreq / 1e6; // Convert to MHz
 
   useEffect(() => {
     if (isRunning && !wsRef.current) {
@@ -232,6 +239,15 @@ function App() {
             <SpectrumDisplay
               data={spectrumData}
               error={error}
+              overallMinFreqMHz={overallMinFreq}
+              overallMaxFreqMHz={overallMaxFreq}
+              filterMinDb={filterMinDb}
+              filterMaxDb={filterMaxDb}
+              filterEnabled={filterEnabled}
+              onFilterMinDbChange={setFilterMinDb}
+              onFilterMaxDbChange={setFilterMaxDb}
+              onFilterEnabledChange={setFilterEnabled}
+              isRunning={isRunning}
             />
           ) : (
             <WaterfallDisplay

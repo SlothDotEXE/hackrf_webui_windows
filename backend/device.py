@@ -17,7 +17,7 @@ class DeviceConfig:
     bandwidth: float = 2.5e6
     lna_gain: int = 32
     vga_gain: int = 20
-    buffer_size: int = 256 * 1024
+    buffer_size: int = 256 * 1024  # Reduced from 512KB to 256KB for better responsiveness
 
 class HackRFDevice:
     def __init__(self):
@@ -63,8 +63,8 @@ class HackRFDevice:
                         self.device.deactivateStream(self.stream)
                         self.device.closeStream(self.stream)
                         self.stream = None
-                except:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Exception while trying to close stream during reset: {e}")
                 self.device = None
             
             # Short delay to allow USB reset
@@ -76,13 +76,23 @@ class HackRFDevice:
                     ["hackrf_reset"], 
                     stdout=subprocess.PIPE, 
                     stderr=subprocess.PIPE,
-                    timeout=2
+                    timeout=2,
+                    check=True
                 )
                 # Wait for reset to complete
                 await asyncio.sleep(1)
                 return True
-            except:
-                logger.error("Failed to reset HackRF device")
+            except subprocess.CalledProcessError as e:
+                logger.error(f"hackrf_reset command failed: {e}")
+                return False
+            except FileNotFoundError:
+                logger.error("hackrf_reset command not found. Ensure HackRF tools are installed and in PATH.")
+                return False
+            except subprocess.TimeoutExpired:
+                logger.error("hackrf_reset command timed out.")
+                return False
+            except Exception as e:
+                logger.error(f"Failed to reset HackRF device: {e}")
                 return False
                 
         except Exception as e:
@@ -112,8 +122,8 @@ class HackRFDevice:
                         self.device.deactivateStream(self.stream)
                         self.device.closeStream(self.stream)
                         self.stream = None
-                except:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Exception while trying to close stream during initialize: {e}")
                 self.device = None
             
             results = SoapySDR.Device.enumerate({"driver": "hackrf"})
