@@ -1,5 +1,5 @@
-import React from 'react';
-import { Paper, Typography } from '@mui/material';
+import React, { useCallback, useMemo, useEffect, useRef } from 'react';
+import { Paper, Typography, Box } from '@mui/material';
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -23,6 +23,13 @@ ChartJS.register(
   Legend
 );
 
+// Reduce animation frame rate for less CPU usage
+ChartJS.defaults.animation = {
+  duration: 0 
+};
+ChartJS.defaults.datasets.line.pointRadius = 0;
+ChartJS.defaults.elements.line.borderWidth = 1;
+
 interface SpectrumData {
   frequencies: number[];
   magnitudes: number[];
@@ -35,14 +42,79 @@ interface SpectrumDisplayProps {
 }
 
 const SpectrumDisplay: React.FC<SpectrumDisplayProps> = ({ data, error }) => {
+  // Add a ref to the chart for direct access
+  const chartRef = useRef<any>(null);
+  
+  // Display debug info
+  useEffect(() => {
+    if (data) {
+      console.log(`Spectrum data received: ${data.magnitudes.length} points`);
+      console.log(`Frequency range: ${data.frequencies[0]/1e6}MHz to ${data.frequencies[data.frequencies.length-1]/1e6}MHz`);
+      console.log(`Magnitude range: ${Math.min(...data.magnitudes)}dB to ${Math.max(...data.magnitudes)}dB`);
+    }
+  }, [data]);
+
   // Calculate dynamic min/max values for better visualization
-  const minPower = data?.magnitudes ? Math.max(-100, Math.min(...data.magnitudes) - 10) : -100;
-  const maxPower = data?.magnitudes ? Math.min(-20, Math.max(...data.magnitudes) + 10) : -20;
+  // Only do this calculation if we have data
+  const { minPower, maxPower, freqMin, freqMax } = useMemo(() => {
+    if (!data || !data.magnitudes.length) {
+      return { minPower: -100, maxPower: -20, freqMin: 88, freqMax: 108 };
+    }
+
+    // Find a reasonable power range without scanning the whole array
+    // Take samples from the array for faster calculation
+    const step = Math.max(1, Math.floor(data.magnitudes.length / 20));
+    const sampledValues = [];
+    for (let i = 0; i < data.magnitudes.length; i += step) {
+      sampledValues.push(data.magnitudes[i]);
+    }
+    
+    const min = Math.max(-100, Math.min(...sampledValues) - 5);
+    const max = Math.min(-20, Math.max(...sampledValues) + 5);
+
+    // Calculate frequency range
+    const fMin = data.frequencies[0] ? data.frequencies[0] / 1e6 : 88;
+    const fMax = data.frequencies[data.frequencies.length - 1] ? 
+      data.frequencies[data.frequencies.length - 1] / 1e6 : 108;
+    
+    return { minPower: min, maxPower: max, freqMin: fMin, freqMax: fMax };
+  }, [data]);
+
+  // Downsample data for better performance - reduced complexity for reliability
+  const { chartFreqs, chartMags } = useMemo(() => {
+    if (!data || !data.magnitudes.length) {
+      return { chartFreqs: [], chartMags: [] };
+    }
+    
+    // Convert frequencies to MHz for display
+    const freqs = data.frequencies.map(f => f / 1e6);
+    
+    // For reliability, don't downsample - just return the raw data
+    return { 
+      chartFreqs: freqs, 
+      chartMags: data.magnitudes 
+    };
+  }, [data]);
+
+  // Force chart update when new data arrives
+  useEffect(() => {
+    if (chartRef.current) {
+      chartRef.current.update();
+    }
+  }, [chartFreqs, chartMags]);
 
   const chartOptions: ChartOptions<'line'> = {
     responsive: true,
-    animation: {
-      duration: 0
+    maintainAspectRatio: false,
+    animation: false,
+    parsing: false,
+    elements: {
+      point: {
+        radius: 0
+      },
+      line: {
+        tension: 0.1
+      }
     },
     interaction: {
       mode: 'nearest',
@@ -55,13 +127,14 @@ const SpectrumDisplay: React.FC<SpectrumDisplayProps> = ({ data, error }) => {
         display: true,
         position: 'bottom',
         bounds: 'data',
-        min: data?.frequencies[0] ? data.frequencies[0] / 1e6 : 88,
-        max: data?.frequencies[data.frequencies.length - 1] ? data.frequencies[data.frequencies.length - 1] / 1e6 : 108,
+        min: freqMin,
+        max: freqMax,
         title: {
           display: true,
           text: 'Frequency (MHz)'
         },
         ticks: {
+          maxTicksLimit: 10,
           callback: function(tickValue: string | number) {
             return typeof tickValue === 'number' ? tickValue.toFixed(2) : tickValue;
           }
@@ -111,15 +184,17 @@ const SpectrumDisplay: React.FC<SpectrumDisplayProps> = ({ data, error }) => {
   };
 
   const chartData = {
-    labels: data?.frequencies.map(f => f / 1e6) || [],
+    labels: chartFreqs,
     datasets: [
       {
-        data: data?.magnitudes || [],
+        data: chartMags.map((y, i) => ({ x: chartFreqs[i], y })),
         borderColor: 'rgb(75, 192, 192)',
         backgroundColor: 'rgba(75, 192, 192, 0.5)',
+        borderWidth: 1.5,
         pointRadius: 0,
-        tension: 0.1,
-        fill: false
+        tension: 0,  // Reduced tension for more accurate display
+        fill: false,
+        spanGaps: true
       }
     ]
   };
@@ -132,11 +207,32 @@ const SpectrumDisplay: React.FC<SpectrumDisplayProps> = ({ data, error }) => {
     );
   }
 
+  // If no data yet, show loading message
+  if (!data) {
+    return (
+      <Paper sx={{ p: 2, height: '60vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <Typography variant="h6" color="text.secondary">
+          Waiting for spectrum data...
+        </Typography>
+      </Paper>
+    );
+  }
+
   return (
     <Paper sx={{ p: 2, height: '60vh' }}>
-      <Line options={chartOptions} data={chartData} />
+      <Box sx={{ width: '100%', height: '100%', position: 'relative' }}>
+        <Line 
+          ref={chartRef}
+          options={chartOptions} 
+          data={chartData} 
+        />
+        <Box sx={{ position: 'absolute', bottom: 5, right: 10, fontSize: '0.75rem', color: 'text.secondary' }}>
+          {data.magnitudes.length} points | {freqMin.toFixed(2)} - {freqMax.toFixed(2)} MHz
+        </Box>
+      </Box>
     </Paper>
   );
 };
 
-export default SpectrumDisplay; 
+// Use React.memo to prevent unnecessary re-renders
+export default React.memo(SpectrumDisplay); 
