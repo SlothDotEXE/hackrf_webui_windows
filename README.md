@@ -256,15 +256,12 @@ pip install -r requirements.txt
 
 ### 🔄 **Medium Term (3-6 months)**
 - [ ] **Audio Demodulation**: FM/AM/SSB demodulation with web audio
-- [ ] **Multiple Device Support**: Connect multiple HackRF devices
 - [ ] **Advanced Triggering**: Start recording based on signal thresholds
 - [ ] **Spectrum Comparison**: Overlay multiple spectrum captures
 - [ ] **Band Plan Integration**: Show frequency allocations and band names
 - [ ] **Signal Classification**: Automatic signal type detection (FM, digital, etc.)
 
 ### 🚀 **Long Term (6+ months)**
-- [ ] **Plugin Architecture**: Support for custom signal processors
-- [ ] **Remote Operation**: Web-based remote HackRF control
 - [ ] **Machine Learning**: AI-powered interference detection
 - [ ] **Record & Playback**: Save/replay IQ data for analysis
 - [ ] **Collaborative Features**: Share spectrum data between users
@@ -272,18 +269,13 @@ pip install -r requirements.txt
 
 ### 🔬 **Advanced Features**
 - [ ] **Digital Signal Analysis**: APRS, ADS-B, LoRa decoders
-- [ ] **Direction Finding**: Phase-coherent multi-device arrays
-- [ ] **EMI/EMC Testing**: Electromagnetic compatibility analysis tools
 - [ ] **Automated Monitoring**: 24/7 spectrum monitoring with alerts
 - [ ] **Database Integration**: Store long-term spectrum data
 - [ ] **Real-time Analytics**: Statistical analysis of spectrum usage
 
 ### 🌐 **Integration Ideas**
 - [ ] **SDR Cloud**: Connect to remote SDR servers worldwide
-- [ ] **Weather Integration**: Correlate atmospheric conditions with propagation
-- [ ] **Satellite Tracking**: Doppler correction for satellite signals
 - [ ] **Contest Logging**: Integration with amateur radio logging software
-- [ ] **Scientific Data**: Export for research and academic use
 
 ## 🤝 Contributing
 
