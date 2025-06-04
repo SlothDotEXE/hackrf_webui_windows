@@ -12,9 +12,9 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class DeviceConfig:
-    sample_rate: float = 2e6
+    sample_rate: float = 20e6
     center_freq: float = 100e6
-    bandwidth: float = 2.5e6
+    bandwidth: float = 20e6
     lna_gain: int = 32
     vga_gain: int = 20
     buffer_size: int = 256 * 1024  # Reduced from 512KB to 256KB for better responsiveness

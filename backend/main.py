@@ -343,6 +343,63 @@ async def websocket_spectrum(websocket: WebSocket):
             pass
         logger.info("WebSocket connection resources cleaned up.")
 
+
+@app.websocket("/ws/hackrf_sweep")
+async def websocket_hackrf_sweep(websocket: WebSocket, start_freq: float, stop_freq: float, bin_width: int = 2000000):
+    """Run hackrf_sweep and stream results over the WebSocket."""
+    await websocket.accept()
+
+    cmd = [
+        "hackrf_sweep",
+        "-1",
+        "-f",
+        f"{start_freq/1e6}:{stop_freq/1e6}",
+        "-w",
+        str(bin_width),
+    ]
+
+    process = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+
+    try:
+        assert process.stdout is not None
+        async for raw in process.stdout:
+            line = raw.decode().strip()
+            parts = line.split(",")
+            if len(parts) < 7:
+                continue
+
+            try:
+                hz_low = float(parts[2])
+                bin_w = float(parts[4])
+                db_values = [float(x) for x in parts[6:]]
+                freqs = [hz_low + i * bin_w for i in range(len(db_values))]
+            except Exception as e:
+                logger.error(f"Failed to parse sweep line: {e}")
+                continue
+
+            await websocket.send_json(
+                {
+                    "type": "spectrum",
+                    "frequencies": freqs,
+                    "magnitudes": db_values,
+                    "timestamp": int(time.time() * 1000),
+                    "center_freq": hz_low + (bin_w * len(db_values) / 2),
+                }
+            )
+    except WebSocketDisconnect:
+        logger.info("hackrf_sweep WebSocket disconnected by client.")
+    except Exception as e:
+        logger.error(f"hackrf_sweep error: {e}")
+        await websocket.send_json({"type": "error", "message": str(e)})
+    finally:
+        if process.returncode is None:
+            process.kill()
+        await process.wait()
+
 @app.post("/api/tune")
 async def tune_frequency(freq: float, sample_rate: float = 2e6):
     """Tune to a specific frequency for FM demodulation."""
