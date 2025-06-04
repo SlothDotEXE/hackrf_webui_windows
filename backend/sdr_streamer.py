@@ -200,9 +200,16 @@ class SDRStreamer:
 
     # For changing frequency during sweep (to be implemented fully later)
     def update_stream_config(self, new_config: DeviceConfig):
-        logger.info(f"SDRStreamer: update_stream_config called. New target freq: {new_config.center_freq/1e6:.2f}MHz")
-        # This is a simplified approach for now. A more robust way involves commands or thread events.
-        # The _run loop needs to pick up this new config and re-call _setup_stream().
-        # For thread safety, this should ideally be done via a command queue to the _run thread.
-        # Or, self._current_config needs a lock if updated directly and read by _run.
-        # A direct approach would be to add a command to its internal queue that _run() can check. 
+        """Update streaming configuration and reconfigure the running stream."""
+        logger.info(
+            f"SDRStreamer: update_stream_config called. New target freq: {new_config.center_freq/1e6:.2f}MHz"
+        )
+
+        self._current_config = new_config
+
+        if not self._running:
+            return
+
+        # Restart the stream with the new settings
+        self._close_stream()
+        self._setup_stream()

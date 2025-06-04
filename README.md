@@ -232,6 +232,7 @@ pip install -r requirements.txt
 
 ### WebSocket
 - `ws://localhost:8000/ws/spectrum` - Real-time spectrum data stream
+- `ws://localhost:8000/ws/hackrf_sweep?start_freq=F&stop_freq=F` - Stream `hackrf_sweep` output
 
 ### Data Formats
 ```javascript
@@ -314,4 +315,4 @@ MIT License - see LICENSE file for details
 
 ---
 
-*Built with ❤️ for the SDR and amateur radio community*
+*Built with ❤️ for the SDR and amateur radio community
